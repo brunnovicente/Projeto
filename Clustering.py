@@ -13,6 +13,7 @@ from sklearn.utils.linear_assignment_ import linear_assignment
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from numpy import linalg
+from scipy.stats import entropy
 
 class ClusteringLayer(Layer):
     '''
@@ -92,10 +93,11 @@ class ClusteringLayer(Layer):
     
 class DEC:
     
-    def __init__(self, z, entrada, k):
+    def __init__(self, z=10, entrada=10, k=10, t=0.1):
         self.k = k
         self.entrada = entrada
         self.z = z
+        self.t = t
         
         input_img = Input((self.entrada,))
         #encoded = Dense(50, activation='relu')(input_img)
@@ -122,14 +124,104 @@ class DEC:
         weight = q**2 / q.sum(0)
         return (weight.T / weight.sum(1)).T
     
-    def inicialicazao(self, X):
+    def inicialicazao(self, U, L, y):
         
-        self.autoencoder.fit(X, X, epochs=100)
+        indiceL = np.arange(np.size(L, axis=0))
+        indiceU = np.arange(np.size(L, axis=0), np.size(L, axis=0) + np.size(U, axis=0))
+        self.rotulos = np.zeros(np.size(U, axis=0))-1
+        
+        self.autoencoder.fit(U, U, epochs=100)
         self.kmeans = KMeans(n_clusters=self.k, n_init=20)
-        self.kmeans.fit(self.encoder.predict(X))
-        self.y_pred = self.kmeans.predict(self.encoder.predict(X))
+        self.kmeans.fit(self.encoder.predict(U))
+        self.y_pred = self.kmeans.predict(self.encoder.predict(U))
         self.cluster_centres = self.kmeans.cluster_centers_
         
         self.DSL = Sequential([self.encoder, ClusteringLayer(self.k, weights=self.cluster_centres, name='clustering')])
         self.DSL.compile(loss='kullback_leibler_divergence', optimizer='adadelta')
+        self.DSL.fit(U, self.p_mat(self.DSL.predict(U)))
+        
+        PL = pd.DataFrame(self.DSL.predict(L), index=indiceL)
+        PL['classe'] = y
+        PL['grupo'] = self.DSL.predict_classes(L)
+        PU = pd.DataFrame(self.DSL.predict(U), index=indiceU)
+        PU['grupo'] = self.DSL.predict_classes(U)
+        self.fi = np.size(L, axis=0)
+        
+        return PL, PU
+        
+    def divisao_grupos(self, U, L):
+        y = L['classe'].values
+        gl = L['grupo'].values
+        indiceL = L.index.values
+        L = L.drop(['grupo'], axis=1)
+        
+        """ DIVISÃO DOS GRUPOS """
+        indice = U.index.values
+
+        for i in np.arange(self.k):
+            Ut = U[U['grupo'] == i]
+            Ut = Ut.drop(['grupo'], axis=1).values
             
+            for a, x in enumerate(Ut):
+                r = self.rotular_amostras(x, L.drop(['classe'], axis=1).values, y, self.k, self.t)
+                self.rotulos[indice[a]-self.fi]  = r
+
+        """ Remoção dos elementos rotulados """
+        Ut = U.drop(['grupo'], axis=1)
+        Ut['classe'] = self.rotulos
+        novos = Ut[Ut['classe'] != -1]
+        L = pd.concat([L, novos])
+        Ut = Ut[Ut['classe']==-1]
+        Ut = Ut.drop(['classe'], axis=1)
+        return L, Ut
+    
+    def rotular_amostras(self, x, L, y, k, t):
+
+        """ Calculando distância da Amostra para cada elemento de L """        
+        dis = []
+        for xr in L:
+            #dis.append(distance.euclidean(x, xr))
+            divergencia = entropy(x, xr)            #Calculando Divergência Kullback Leibler
+            dis.append(divergencia)
+        
+        """ Descobrindo os k vizinhos rotulados menos divergentes """
+        rot = pd.DataFrame(L)
+        rot['y'] = y
+        
+        
+        rot['dis'] = dis
+        rot = rot.sort_values(by='dis')
+        vizinhos = rot.iloc[0:k,:]
+        vizinhos = vizinhos[vizinhos['dis']<=t]        
+        
+        """ Caso não existem vizinhos rotulados suficientes """
+        if np.size(vizinhos, axis=1) < k:
+            return -1
+        
+        """ Calculando as Classes """
+        classes = np.unique(y)
+        P = []
+        for c in classes:
+            q = (vizinhos['y'] == c).sum()
+            p = q / k
+            P.append(p)
+        classe = self.calcular_classe(P)
+        
+        return classe
+    
+    def calcular_classe(self, probabilidades):
+        c = -1
+        for i, p in enumerate(probabilidades):
+            pr = np.round(p)
+            if pr == 1.:
+                c = i
+                break
+        return c
+    
+    def ajuste_fino(self, PL, PU):
+        
+        pass 
+        
+        
+        
+        
